@@ -318,50 +318,57 @@ class SpectrumAnalyzerApp:
 
         center = imgui.get_main_viewport().get_center()
         imgui.set_next_window_pos(center, imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
-        imgui.set_next_window_size(imgui.ImVec2(560, 420), imgui.Cond_.appearing)
+        imgui.set_next_window_size(imgui.ImVec2(600, 460), imgui.Cond_.appearing)
 
         opened, _ = imgui.begin_popup_modal(
             "Select Audio Input", None,
-            imgui.WindowFlags_.no_resize | imgui.WindowFlags_.no_scrollbar
+            imgui.WindowFlags_.no_resize
         )
         if not opened:
             self._show_input_modal = False
             return
 
-        imgui.text("Choose an audio input device:")
-        imgui.spacing()
-        imgui.separator()
-        imgui.spacing()
-
         devices = self._modal_devices
         current_idx = inst.settings_ui._selected_device_idx
 
-        imgui.begin_child("##device_list", imgui.ImVec2(0, -40), child_flags=imgui.ChildFlags_.borders)
+        # Header
+        imgui.text_disabled("Click to select a device. Double-click to select and close.")
+        imgui.spacing()
+
+        imgui.begin_child("##device_list", imgui.ImVec2(0, -44), child_flags=imgui.ChildFlags_.borders)
 
         for i, dev in enumerate(devices):
             is_selected = (i == current_idx)
 
-            # Determine icon/type label
+            # Type info
             if dev.is_loopback:
                 type_label = "LOOPBACK"
-                type_color = imgui.ImVec4(0.3, 0.7, 1.0, 1.0)
+                type_color = imgui.ImVec4(0.4, 0.75, 1.0, 1.0)
+                icon = "\xF0\x9F\x94\x8A "  # speaker emoji as utf8 — fallback gracefully
             else:
                 type_label = "INPUT"
-                type_color = imgui.ImVec4(0.3, 0.9, 0.4, 1.0)
+                type_color = imgui.ImVec4(0.4, 0.92, 0.5, 1.0)
+                icon = ""
+
+            # Clean up display name
+            display_name = dev.name
+            for prefix in ("[Input] ", "[Loopback] "):
+                if display_name.startswith(prefix):
+                    display_name = display_name[len(prefix):]
+                    break
 
             imgui.push_id(i)
 
-            # Selectable row area
-            cursor_y = imgui.get_cursor_pos_y()
-            row_height = 48.0
+            # Build the label string for the selectable
+            label = f"  {display_name}"
             selected_changed, _ = imgui.selectable(
                 f"##dev_{i}", is_selected,
-                imgui.SelectableFlags_.allow_double_click,
-                imgui.ImVec2(0, row_height),
+                imgui.SelectableFlags_.allow_double_click
+                | imgui.SelectableFlags_.span_all_columns,
+                imgui.ImVec2(0, 0),
             )
 
             if selected_changed:
-                # Switch device
                 inst.settings_ui._selected_device_idx = i
                 inst.audio.stop()
                 inst.config.use_loopback = dev.is_loopback
@@ -376,29 +383,26 @@ class SpectrumAnalyzerApp:
                     self._show_input_modal = False
                     imgui.close_current_popup()
 
-            # Draw content over the selectable
-            imgui.set_cursor_pos_y(cursor_y + 4)
-            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + 8)
+            # Draw rich content over the selectable using SameLine to go back
+            imgui.same_line(0, 0)
+            imgui.begin_group()
+            imgui.indent(8)
 
-            # Type badge
+            # Row 1: type badge + device name
             imgui.text_colored(type_color, f"[{type_label}]")
             imgui.same_line()
-
-            # Device name (strip prefix for cleaner display)
-            display_name = dev.name
-            for prefix in ("[Input] ", "[Loopback] "):
-                if display_name.startswith(prefix):
-                    display_name = display_name[len(prefix):]
-                    break
             imgui.text(display_name)
 
-            # Second line: sample rate + host API + level bar
-            imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + 8)
-            imgui.text_disabled(f"{int(dev.sample_rate)} Hz  |  {dev.host_api}  |  {dev.channels}ch")
+            # Row 2: details + level bar
+            detail = f"{int(dev.sample_rate)} Hz  \u2022  {dev.host_api}  \u2022  {dev.channels}ch"
+            imgui.text_disabled(detail)
 
-            # Level indicator bar (horizontal) on the right side
+            # Level bar — draw inline using imgui draw list over a Dummy
+            bar_width = 180.0
+            bar_height = 8.0
+
+            # Compute level for currently active device
             if is_selected and inst.audio.is_running:
-                # Get current audio level
                 samples = inst.ring_buffer.read_latest(1024)
                 if samples is not None:
                     rms = float(np.sqrt(np.mean(samples ** 2)))
@@ -406,45 +410,63 @@ class SpectrumAnalyzerApp:
                     level_t = max(0.0, min(1.0, (level_db + 60.0) / 60.0))
                 else:
                     level_t = 0.0
+            else:
+                level_t = 0.0
 
-                draw_list = imgui.get_window_draw_list()
-                bar_width = 120.0
-                bar_height = 6.0
-                screen_pos = imgui.get_cursor_screen_pos()
-                bar_x = screen_pos.x + 8
-                bar_y = screen_pos.y - 4
+            # Reserve space with Dummy, then draw over it
+            screen_pos = imgui.get_cursor_screen_pos()
+            imgui.dummy(imgui.ImVec2(bar_width, bar_height))
+            draw_list = imgui.get_window_draw_list()
+            bar_x = screen_pos.x
+            bar_y = screen_pos.y
 
-                # Background
+            # Background bar
+            draw_list.add_rect_filled(
+                imgui.ImVec2(bar_x, bar_y),
+                imgui.ImVec2(bar_x + bar_width, bar_y + bar_height),
+                imgui.get_color_u32(imgui.ImVec4(0.18, 0.18, 0.22, 1.0)),
+                3.0,
+            )
+            # Filled portion (green → yellow → red gradient based on level)
+            if level_t > 0.01:
+                fill_w = bar_width * level_t
+                r = min(1.0, level_t * 2.0)
+                g = min(1.0, (1.0 - level_t) * 2.0)
+                draw_list.add_rect_filled(
+                    imgui.ImVec2(bar_x, bar_y),
+                    imgui.ImVec2(bar_x + fill_w, bar_y + bar_height),
+                    imgui.get_color_u32(imgui.ImVec4(r, g, 0.15, 1.0)),
+                    3.0,
+                )
+            elif not (is_selected and inst.audio.is_running):
+                # Dim "no signal" indicator
                 draw_list.add_rect_filled(
                     imgui.ImVec2(bar_x, bar_y),
                     imgui.ImVec2(bar_x + bar_width, bar_y + bar_height),
-                    imgui.get_color_u32(imgui.ImVec4(0.2, 0.2, 0.2, 1.0)),
-                    2.0,
+                    imgui.get_color_u32(imgui.ImVec4(0.12, 0.12, 0.15, 1.0)),
+                    3.0,
                 )
-                # Filled portion
-                if level_t > 0:
-                    r = min(1.0, level_t * 2.0)
-                    g = min(1.0, (1.0 - level_t) * 2.0)
-                    draw_list.add_rect_filled(
-                        imgui.ImVec2(bar_x, bar_y),
-                        imgui.ImVec2(bar_x + bar_width * level_t, bar_y + bar_height),
-                        imgui.get_color_u32(imgui.ImVec4(r, g, 0.1, 1.0)),
-                        2.0,
-                    )
 
-            imgui.set_cursor_pos_y(cursor_y + row_height + 2)
+            imgui.unindent(8)
+            imgui.spacing()
+            imgui.end_group()
+
             imgui.pop_id()
 
         imgui.end_child()
 
+        # Footer buttons
         imgui.spacing()
-        if imgui.button("Close", imgui.ImVec2(80, 0)):
-            self._show_input_modal = False
-            imgui.close_current_popup()
-        imgui.same_line()
-        if imgui.button("Refresh", imgui.ImVec2(80, 0)):
+        button_width = 100.0
+        avail = imgui.get_content_region_avail()
+        imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + avail.x - button_width * 2 - 8)
+        if imgui.button("Refresh", imgui.ImVec2(button_width, 0)):
             inst.settings_ui.refresh_devices()
             self._modal_devices = inst.settings_ui._devices[:]
+        imgui.same_line()
+        if imgui.button("Close", imgui.ImVec2(button_width, 0)):
+            self._show_input_modal = False
+            imgui.close_current_popup()
 
         imgui.end_popup()
 
