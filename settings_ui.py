@@ -11,14 +11,20 @@ from themes import THEMES, apply_imgui_theme
 
 
 class SettingsUI:
-    def __init__(self, config: AppConfig, audio: AudioCapture, dsp: DSPProcessor):
+    def __init__(self, config: AppConfig, audio: AudioCapture, dsp: DSPProcessor,
+                 instance_id: str = ""):
         self.config = config
         self._audio = audio
         self._dsp = dsp
+        self._id = instance_id
         self._devices: list[AudioDevice] = []
         self._device_names: list[str] = []
         self._selected_device_idx: int = 0
         self.show_settings: bool = True
+
+    def _uid(self, label: str) -> str:
+        """Return unique widget ID for this instance."""
+        return f"{label}##{self._id}" if self._id else label
 
     def refresh_devices(self):
         self._devices = self._audio.enumerate_devices()
@@ -28,26 +34,26 @@ class SettingsUI:
 
     def render(self) -> bool:
         """Render settings panel. Returns True if config changed."""
+        if not self.show_settings:
+            return False
+
         changed = False
 
         imgui.set_next_window_size(imgui.ImVec2(340, 600), imgui.Cond_.first_use_ever)
-        imgui.set_next_window_pos(
-            imgui.ImVec2(imgui.get_main_viewport().work_pos.x + 5,
-                         imgui.get_main_viewport().work_pos.y + 5),
-            imgui.Cond_.first_use_ever,
-        )
 
-        expanded, p_open = imgui.begin("Settings", self.show_settings if self.show_settings else None)
-        if p_open is not None:
-            self.show_settings = p_open
+        expanded, p_open = imgui.begin(self._uid("Settings"), True)
+        if p_open is not None and not p_open:
+            self.show_settings = False
+            imgui.end()
+            return False
 
         # ── Audio Device ──────────────────────────────────────────────
-        if imgui.collapsing_header("Audio Device", imgui.TreeNodeFlags_.default_open):
-            if imgui.button("Refresh Devices"):
+        if imgui.collapsing_header(self._uid("Audio Device"), imgui.TreeNodeFlags_.default_open):
+            if imgui.button(self._uid("Refresh Devices")):
                 self.refresh_devices()
 
             imgui.set_next_item_width(-1)
-            ch, idx = imgui.combo("##device", self._selected_device_idx, self._device_names)
+            ch, idx = imgui.combo(self._uid("##device"), self._selected_device_idx, self._device_names)
             if ch and self._devices:
                 self._selected_device_idx = idx
                 dev = self._devices[idx]
@@ -72,14 +78,14 @@ class SettingsUI:
             imgui.separator()
 
         # ── Display Mode ──────────────────────────────────────────────
-        if imgui.collapsing_header("Display", imgui.TreeNodeFlags_.default_open):
+        if imgui.collapsing_header(self._uid("Display"), imgui.TreeNodeFlags_.default_open):
             dm_list = list(DisplayMode)
             dm_names = [d.name.replace("_", " ").title() for d in dm_list]
             dm_idx = dm_list.index(self.config.display_mode)
             imgui.text("Mode")
             imgui.same_line()
             imgui.set_next_item_width(-1)
-            ch, dm_idx = imgui.combo("##mode", dm_idx, dm_names)
+            ch, dm_idx = imgui.combo(self._uid("##mode"), dm_idx, dm_names)
             if ch:
                 self.config.display_mode = dm_list[dm_idx]
                 changed = True
@@ -91,7 +97,7 @@ class SettingsUI:
             imgui.text("Theme")
             imgui.same_line()
             imgui.set_next_item_width(-1)
-            ch, ct_idx = imgui.combo("##theme", ct_idx, ct_names)
+            ch, ct_idx = imgui.combo(self._uid("##theme"), ct_idx, ct_names)
             if ch:
                 self.config.color_theme = ct_list[ct_idx]
                 apply_imgui_theme(THEMES[self.config.color_theme])
@@ -99,23 +105,23 @@ class SettingsUI:
 
             # dB range
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_float("dB Range", self.config.db_range, 40.0, 120.0, "%.0f dB")
+            ch, val = imgui.slider_float(self._uid("dB Range"), self.config.db_range, 40.0, 120.0, "%.0f dB")
             if ch:
                 self.config.db_range = val
                 changed = True
 
-            ch, val = imgui.checkbox("Show FPS", self.config.show_fps)
+            ch, val = imgui.checkbox(self._uid("Show FPS"), self.config.show_fps)
             if ch:
                 self.config.show_fps = val
 
-            ch, val = imgui.checkbox("Show Grid", self.config.show_grid)
+            ch, val = imgui.checkbox(self._uid("Show Grid"), self.config.show_grid)
             if ch:
                 self.config.show_grid = val
 
             imgui.separator()
 
         # ── DSP Settings ──────────────────────────────────────────────
-        if imgui.collapsing_header("DSP / Analysis", imgui.TreeNodeFlags_.default_open):
+        if imgui.collapsing_header(self._uid("DSP / Analysis"), imgui.TreeNodeFlags_.default_open):
             # FFT Size
             fft_sizes = [512, 1024, 2048, 4096, 8192, 16384]
             fft_labels = [str(s) for s in fft_sizes]
@@ -123,7 +129,7 @@ class SettingsUI:
             imgui.text("FFT Size")
             imgui.same_line()
             imgui.set_next_item_width(-1)
-            ch, fft_idx = imgui.combo("##fft", fft_idx, fft_labels)
+            ch, fft_idx = imgui.combo(self._uid("##fft"), fft_idx, fft_labels)
             if ch:
                 self.config.fft_size = fft_sizes[fft_idx]
                 self._dsp.invalidate_caches()
@@ -131,7 +137,7 @@ class SettingsUI:
 
             # Number of bands
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_int("Bands", self.config.num_bands, 8, 256)
+            ch, val = imgui.slider_int(self._uid("Bands"), self.config.num_bands, 8, 256)
             if ch:
                 self.config.num_bands = val
                 self._dsp.invalidate_caches()
@@ -144,7 +150,7 @@ class SettingsUI:
             imgui.text("Window")
             imgui.same_line()
             imgui.set_next_item_width(-1)
-            ch, wf_idx = imgui.combo("##window", wf_idx, wf_names)
+            ch, wf_idx = imgui.combo(self._uid("##window"), wf_idx, wf_names)
             if ch:
                 self.config.window_function = wf_list[wf_idx]
                 self._dsp.invalidate_caches()
@@ -157,7 +163,7 @@ class SettingsUI:
             imgui.text("Octave")
             imgui.same_line()
             imgui.set_next_item_width(-1)
-            ch, oct_idx = imgui.combo("##octave", oct_idx, oct_names)
+            ch, oct_idx = imgui.combo(self._uid("##octave"), oct_idx, oct_names)
             if ch:
                 self.config.octave_mode = oct_list[oct_idx]
                 self._dsp.invalidate_caches()
@@ -167,19 +173,19 @@ class SettingsUI:
 
             # Smoothing
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_float("Smoothing", self.config.smoothing_factor, 0.0, 0.95, "%.2f")
+            ch, val = imgui.slider_float(self._uid("Smoothing"), self.config.smoothing_factor, 0.0, 0.95, "%.2f")
             if ch:
                 self.config.smoothing_factor = val
                 changed = True
 
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_int("Spectral Smooth", self.config.spectral_smoothing, 1, 15)
+            ch, val = imgui.slider_int(self._uid("Spectral Smooth"), self.config.spectral_smoothing, 1, 15)
             if ch:
-                self.config.spectral_smoothing = val | 1  # ensure odd
+                self.config.spectral_smoothing = val | 1
                 changed = True
 
             # A-weighting
-            ch, val = imgui.checkbox("A-Weighting", self.config.a_weighting)
+            ch, val = imgui.checkbox(self._uid("A-Weighting"), self.config.a_weighting)
             if ch:
                 self.config.a_weighting = val
                 self._dsp.invalidate_caches()
@@ -191,7 +197,7 @@ class SettingsUI:
             imgui.text("Frequency Range (Hz)")
             imgui.set_next_item_width(-1)
             ch, lo, hi = imgui.drag_float_range2(
-                "##freq_range",
+                self._uid("##freq_range"),
                 self.config.freq_min, self.config.freq_max,
                 1.0, 20.0, 22050.0,
                 "Min: %.0f", "Max: %.0f",
@@ -204,15 +210,15 @@ class SettingsUI:
             imgui.separator()
 
         # ── Peak Hold ─────────────────────────────────────────────────
-        if imgui.collapsing_header("Peak Hold"):
+        if imgui.collapsing_header(self._uid("Peak Hold")):
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_float("Hold Time", self.config.peak_hold_time, 0.0, 10.0, "%.1f s")
+            ch, val = imgui.slider_float(self._uid("Hold Time"), self.config.peak_hold_time, 0.0, 10.0, "%.1f s")
             if ch:
                 self.config.peak_hold_time = val
                 changed = True
 
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_float("Decay Rate", self.config.peak_decay_rate, 0.01, 2.0, "%.2f dB/frame")
+            ch, val = imgui.slider_float(self._uid("Decay Rate"), self.config.peak_decay_rate, 0.01, 2.0, "%.2f dB/frame")
             if ch:
                 self.config.peak_decay_rate = val
                 changed = True
@@ -220,9 +226,9 @@ class SettingsUI:
             imgui.separator()
 
         # ── Spectrogram ───────────────────────────────────────────────
-        if imgui.collapsing_header("Spectrogram"):
+        if imgui.collapsing_header(self._uid("Spectrogram")):
             imgui.set_next_item_width(-1)
-            ch, val = imgui.slider_float("History", self.config.spectrogram_history_seconds, 1.0, 30.0, "%.1f s")
+            ch, val = imgui.slider_float(self._uid("History"), self.config.spectrogram_history_seconds, 1.0, 30.0, "%.1f s")
             if ch:
                 self.config.spectrogram_history_seconds = val
                 changed = True

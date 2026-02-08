@@ -10,8 +10,9 @@ from themes import THEMES, ThemeColors, lerp_color, color_to_u32
 
 
 class Renderer:
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, instance_id: str = ""):
         self.config = config
+        self._id = instance_id
         self._spectrogram_history: list[np.ndarray] = []
         self._fps_samples: list[float] = []
 
@@ -35,14 +36,74 @@ class Renderer:
 
         self._render_level_meters(result, theme)
 
-        if self.config.show_fps:
-            self._render_fps_overlay()
+    def _draw_crosshair(self, theme: ThemeColors, x_label: str = "Freq", y_label: str = "dB",
+                        x_format_fn=None):
+        """Draw crosshair with labeled values at the centre. Call inside an active implot plot."""
+        if not implot.is_plot_hovered():
+            return
+
+        mouse_pos = implot.get_plot_mouse_pos()
+        plot_pos = imgui.get_mouse_pos()
+        draw_list = implot.get_plot_draw_list()
+
+        # Crosshair lines
+        plot_limits = implot.get_plot_limits()
+        cross_col = color_to_u32(*theme.text[:3], 0.45)
+
+        p_left = implot.plot_to_pixels(plot_limits.x.min, mouse_pos.y)
+        p_right = implot.plot_to_pixels(plot_limits.x.max, mouse_pos.y)
+        draw_list.add_line(imgui.ImVec2(p_left.x, p_left.y),
+                           imgui.ImVec2(p_right.x, p_right.y), cross_col, 1.0)
+
+        p_top = implot.plot_to_pixels(mouse_pos.x, plot_limits.y.max)
+        p_bot = implot.plot_to_pixels(mouse_pos.x, plot_limits.y.min)
+        draw_list.add_line(imgui.ImVec2(p_top.x, p_top.y),
+                           imgui.ImVec2(p_bot.x, p_bot.y), cross_col, 1.0)
+
+        # Format values
+        if x_format_fn:
+            x_str = x_format_fn(mouse_pos.x)
+        else:
+            x_str = f"{mouse_pos.x:.1f}"
+        y_str = f"{mouse_pos.y:.1f}"
+
+        label = f"{x_label}: {x_str}\n{y_label}: {y_str}"
+        label_size = imgui.calc_text_size(label)
+
+        # Position label near crosshair center with slight offset
+        offset_x = 12.0
+        offset_y = -label_size.y - 8.0
+        lx = plot_pos.x + offset_x
+        ly = plot_pos.y + offset_y
+
+        # Background box
+        pad = 4.0
+        bg_col = color_to_u32(*theme.background[:3], 0.85)
+        draw_list.add_rect_filled(
+            imgui.ImVec2(lx - pad, ly - pad),
+            imgui.ImVec2(lx + label_size.x + pad, ly + label_size.y + pad),
+            bg_col, 3.0,
+        )
+        draw_list.add_rect(
+            imgui.ImVec2(lx - pad, ly - pad),
+            imgui.ImVec2(lx + label_size.x + pad, ly + label_size.y + pad),
+            color_to_u32(*theme.border), 3.0, 0, 1.0,
+        )
+        draw_list.add_text(imgui.ImVec2(lx, ly), color_to_u32(*theme.text), label)
+
+    def _win(self, name: str) -> str:
+        """Return unique window name for this instance."""
+        return f"{name}##{self._id}" if self._id else name
+
+    def _plot(self, name: str) -> str:
+        """Return unique plot ID for this instance."""
+        return f"{name}##{self._id}"
 
     # ── Bar Graph ──────────────────────────────────────────────────────
 
     def _render_bar_graph(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(800, 400), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         size = imgui.get_content_region_avail()
         if size.x < 10 or size.y < 10:
             imgui.end()
@@ -53,8 +114,8 @@ class Renderer:
             imgui.end()
             return
 
-        if implot.begin_plot("##bars", imgui.ImVec2(size.x, size.y)):
-            implot.setup_axes("Frequency", "dB", implot.AxisFlags_.no_tick_labels, 0)
+        if implot.begin_plot(self._plot("##bars"), imgui.ImVec2(size.x, size.y)):
+            implot.setup_axes("Frequency", "dB", 0, 0)
             implot.setup_axes_limits(0, num, -self.config.db_range, 6, implot.Cond_.always)
 
             # Custom tick labels for frequency axis
@@ -70,18 +131,15 @@ class Renderer:
             plot_dl = implot.get_plot_draw_list()
             implot.push_plot_clip_rect()
 
-            bar_w = 0.85
             for i in range(num):
                 db = result.band_magnitudes_db[i]
                 t = max(0.0, min(1.0, (db + self.config.db_range) / (self.config.db_range + 6)))
                 color = lerp_color(t, theme.bar_gradient_low, theme.bar_gradient_mid, theme.bar_gradient_high)
 
-                p_min = implot.plot_to_pixels(i + 0.5 - bar_w / 2, -self.config.db_range)
-                p_max = implot.plot_to_pixels(i + 0.5 + bar_w / 2, db)
+                p_min = implot.plot_to_pixels(float(i), -self.config.db_range)
+                p_max = implot.plot_to_pixels(float(i + 1), db)
 
                 col = color_to_u32(*color)
-                # Gradient: draw bottom half with low color, top with actual
-                mid_y = p_min.y + (p_max.y - p_min.y) * 0.5
                 col_base = color_to_u32(*lerp_color(t * 0.4, theme.bar_gradient_low, theme.bar_gradient_mid, theme.bar_gradient_high))
                 plot_dl.add_rect_filled_multi_color(
                     imgui.ImVec2(p_min.x, min(p_min.y, p_max.y)),
@@ -94,8 +152,8 @@ class Renderer:
             for i in range(num):
                 pk = result.peak_hold_db[i]
                 if pk > -self.config.db_range:
-                    p1 = implot.plot_to_pixels(i + 0.5 - bar_w / 2, pk)
-                    p2 = implot.plot_to_pixels(i + 0.5 + bar_w / 2, pk)
+                    p1 = implot.plot_to_pixels(float(i), pk)
+                    p2 = implot.plot_to_pixels(float(i + 1), pk)
                     plot_dl.add_line(
                         imgui.ImVec2(p1.x, p1.y),
                         imgui.ImVec2(p2.x, p2.y),
@@ -103,6 +161,12 @@ class Renderer:
                     )
 
             implot.pop_plot_clip_rect()
+
+            self._draw_crosshair(theme, x_label="Freq", y_label="Volume (dB)",
+                                 x_format_fn=lambda x: _format_freq(
+                                     result.band_centers[min(max(int(x), 0), len(result.band_centers) - 1)]
+                                 ) if len(result.band_centers) > 0 else None)
+
             implot.end_plot()
 
         imgui.end()
@@ -111,7 +175,7 @@ class Renderer:
 
     def _render_smooth_line(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(800, 400), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         size = imgui.get_content_region_avail()
         if size.x < 10 or size.y < 10:
             imgui.end()
@@ -122,7 +186,7 @@ class Renderer:
             imgui.end()
             return
 
-        if implot.begin_plot("##line", imgui.ImVec2(size.x, size.y)):
+        if implot.begin_plot(self._plot("##line"), imgui.ImVec2(size.x, size.y)):
             implot.setup_axes("Frequency (Hz)", "dB")
             implot.setup_axes_limits(
                 self.config.freq_min, self.config.freq_max,
@@ -153,6 +217,9 @@ class Renderer:
             implot.set_next_line_style(imgui.ImVec4(*theme.peak_marker), 1.0)
             implot.plot_line("Peak", xs, peak_ys)
 
+            self._draw_crosshair(theme, x_label="Freq", y_label="Volume (dB)",
+                                 x_format_fn=lambda x: _format_freq(x) + " Hz")
+
             implot.end_plot()
 
         imgui.end()
@@ -160,7 +227,6 @@ class Renderer:
     # ── Spectrogram ────────────────────────────────────────────────────
 
     def _render_spectrogram(self, result: DSPResult, theme: ThemeColors):
-        # Downsample FFT to fixed column count
         target_cols = 256
         spec_line = result.spectrogram_line
         if len(spec_line) > target_cols:
@@ -179,7 +245,7 @@ class Renderer:
             self._spectrogram_history = self._spectrogram_history[-max_lines:]
 
         imgui.set_next_window_size(imgui.ImVec2(800, 400), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         size = imgui.get_content_region_avail()
         if size.x < 10 or size.y < 10:
             imgui.end()
@@ -190,7 +256,7 @@ class Renderer:
             imgui.end()
             return
 
-        if implot.begin_plot("##spectrogram", imgui.ImVec2(size.x, size.y)):
+        if implot.begin_plot(self._plot("##spectrogram"), imgui.ImVec2(size.x, size.y)):
             implot.setup_axes("Frequency", "Time")
 
             data = np.array(self._spectrogram_history, dtype=np.float64)
@@ -215,7 +281,7 @@ class Renderer:
 
     def _render_radial(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(600, 600), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         size = imgui.get_content_region_avail()
         if size.x < 10 or size.y < 10:
             imgui.end()
@@ -270,7 +336,6 @@ class Renderer:
             pk_t = max(0.0, min(1.0, (pk + self.config.db_range) / (self.config.db_range + 6)))
             pk_r = r_min + (r_max - r_min) * pk_t
             if pk_r > r_min + 2:
-                a_mid = (angle_start + angle_end) / 2
                 p1 = imgui.ImVec2(cx + pk_r * math.cos(angle_start), cy + pk_r * math.sin(angle_start))
                 p2 = imgui.ImVec2(cx + pk_r * math.cos(angle_end), cy + pk_r * math.sin(angle_end))
                 draw_list.add_line(p1, p2, color_to_u32(*theme.peak_marker), 1.5)
@@ -293,13 +358,13 @@ class Renderer:
 
     def _render_oscilloscope(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(800, 400), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         size = imgui.get_content_region_avail()
         if size.x < 10 or size.y < 10:
             imgui.end()
             return
 
-        if implot.begin_plot("##scope", imgui.ImVec2(size.x, size.y)):
+        if implot.begin_plot(self._plot("##scope"), imgui.ImVec2(size.x, size.y)):
             implot.setup_axes("Sample", "Amplitude")
             n = len(result.waveform)
             implot.setup_axes_limits(0, n, -1, 1, implot.Cond_.always)
@@ -316,6 +381,8 @@ class Renderer:
             implot.set_next_line_style(imgui.ImVec4(*theme.waveform_color), 1.5)
             implot.plot_line("Waveform", xs, ys)
 
+            self._draw_crosshair(theme, x_label="Sample", y_label="Amplitude")
+
             implot.end_plot()
 
         imgui.end()
@@ -324,7 +391,7 @@ class Renderer:
 
     def _render_combined(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(900, 600), imgui.Cond_.first_use_ever)
-        imgui.begin("Spectrum Analyzer")
+        imgui.begin(self._win("Spectrum Analyzer"))
         avail = imgui.get_content_region_avail()
         if avail.x < 10 or avail.y < 10:
             imgui.end()
@@ -334,8 +401,8 @@ class Renderer:
 
         # Top: bar spectrum (60%)
         bar_h = avail.y * 0.58
-        if num > 0 and implot.begin_plot("##combined_bars", imgui.ImVec2(avail.x, bar_h)):
-            implot.setup_axes("Frequency", "dB", implot.AxisFlags_.no_tick_labels, 0)
+        if num > 0 and implot.begin_plot(self._plot("##combined_bars"), imgui.ImVec2(avail.x, bar_h)):
+            implot.setup_axes("Frequency", "dB", 0, 0)
             implot.setup_axes_limits(0, num, -self.config.db_range, 6, implot.Cond_.always)
 
             if len(result.band_centers) == num:
@@ -349,13 +416,12 @@ class Renderer:
             plot_dl = implot.get_plot_draw_list()
             implot.push_plot_clip_rect()
 
-            bar_w = 0.85
             for i in range(num):
                 db = result.band_magnitudes_db[i]
                 t = max(0.0, min(1.0, (db + self.config.db_range) / (self.config.db_range + 6)))
                 color = lerp_color(t, theme.bar_gradient_low, theme.bar_gradient_mid, theme.bar_gradient_high)
-                p_min = implot.plot_to_pixels(i + 0.5 - bar_w / 2, -self.config.db_range)
-                p_max = implot.plot_to_pixels(i + 0.5 + bar_w / 2, db)
+                p_min = implot.plot_to_pixels(float(i), -self.config.db_range)
+                p_max = implot.plot_to_pixels(float(i + 1), db)
                 col = color_to_u32(*color)
                 col_base = color_to_u32(*lerp_color(t * 0.4, theme.bar_gradient_low, theme.bar_gradient_mid, theme.bar_gradient_high))
                 plot_dl.add_rect_filled_multi_color(
@@ -368,23 +434,32 @@ class Renderer:
             for i in range(num):
                 pk = result.peak_hold_db[i]
                 if pk > -self.config.db_range:
-                    p1 = implot.plot_to_pixels(i + 0.5 - bar_w / 2, pk)
-                    p2 = implot.plot_to_pixels(i + 0.5 + bar_w / 2, pk)
+                    p1 = implot.plot_to_pixels(float(i), pk)
+                    p2 = implot.plot_to_pixels(float(i + 1), pk)
                     plot_dl.add_line(imgui.ImVec2(p1.x, p1.y), imgui.ImVec2(p2.x, p2.y), peak_col, 2.0)
 
             implot.pop_plot_clip_rect()
+
+            self._draw_crosshair(theme, x_label="Freq", y_label="Volume (dB)",
+                                 x_format_fn=lambda x: _format_freq(
+                                     result.band_centers[min(max(int(x), 0), len(result.band_centers) - 1)]
+                                 ) if len(result.band_centers) > 0 else None)
+
             implot.end_plot()
 
         # Bottom: oscilloscope (37%)
         scope_h = avail.y * 0.37
         n_wave = len(result.waveform)
-        if n_wave > 0 and implot.begin_plot("##combined_scope", imgui.ImVec2(avail.x, scope_h)):
+        if n_wave > 0 and implot.begin_plot(self._plot("##combined_scope"), imgui.ImVec2(avail.x, scope_h)):
             implot.setup_axes("Sample", "Amplitude")
             implot.setup_axes_limits(0, n_wave, -1, 1, implot.Cond_.always)
             xs = np.arange(n_wave, dtype=np.float64)
             ys = result.waveform.astype(np.float64)
             implot.set_next_line_style(imgui.ImVec4(*theme.waveform_color), 1.5)
             implot.plot_line("Waveform", xs, ys)
+
+            self._draw_crosshair(theme, x_label="Sample", y_label="Amplitude")
+
             implot.end_plot()
 
         imgui.end()
@@ -393,7 +468,7 @@ class Renderer:
 
     def _render_level_meters(self, result: DSPResult, theme: ThemeColors):
         imgui.set_next_window_size(imgui.ImVec2(140, 300), imgui.Cond_.first_use_ever)
-        imgui.begin("Levels")
+        imgui.begin(self._win("Levels"))
         avail = imgui.get_content_region_avail()
         if avail.x < 10 or avail.y < 30:
             imgui.end()
@@ -422,7 +497,6 @@ class Renderer:
             imgui.ImVec2(x0, y_top), imgui.ImVec2(x0 + bar_w, y_bot),
             color_to_u32(0.15, 0.15, 0.18, 1.0),
         )
-        # Filled portion with gradient
         if rms_h > 0:
             for seg in range(int(rms_h)):
                 seg_t = seg / max(meter_h, 1)
@@ -488,32 +562,16 @@ class Renderer:
         imgui.dummy(avail)
         imgui.end()
 
-    # ── FPS Overlay ────────────────────────────────────────────────────
-
-    def _render_fps_overlay(self):
-        flags = (
-            imgui.WindowFlags_.no_decoration
-            | imgui.WindowFlags_.always_auto_resize
-            | imgui.WindowFlags_.no_focus_on_appearing
-            | imgui.WindowFlags_.no_nav
-            | imgui.WindowFlags_.no_move
-        )
-        vp = imgui.get_main_viewport()
-        imgui.set_next_window_pos(
-            imgui.ImVec2(vp.work_pos.x + vp.work_size.x - 90, vp.work_pos.y + 5),
-            imgui.Cond_.always,
-        )
-        imgui.set_next_window_bg_alpha(0.4)
-        imgui.begin("##fps", None, flags)
-        avg_dt = np.mean(self._fps_samples) if self._fps_samples else 1 / 60
-        fps = 1.0 / max(avg_dt, 0.001)
-        imgui.text(f"FPS: {fps:.0f}")
-        imgui.end()
-
     def _update_fps(self, dt: float):
         self._fps_samples.append(dt)
         if len(self._fps_samples) > 120:
             self._fps_samples = self._fps_samples[-60:]
+
+    def get_fps(self) -> float:
+        if not self._fps_samples:
+            return 0.0
+        avg_dt = np.mean(self._fps_samples)
+        return 1.0 / max(avg_dt, 0.001)
 
 
 def _format_freq(f: float) -> str:
