@@ -1,6 +1,7 @@
 """Audio device enumeration and capture using sounddevice and PyAudioWPatch."""
 
 import threading
+import time
 import numpy as np
 from dataclasses import dataclass
 
@@ -194,3 +195,133 @@ class AudioCapture:
         except Exception as e:
             print(f"WASAPI loopback error: {e}")
             self._running = False
+
+
+class DeviceLevelMonitor:
+    """Opens lightweight streams on multiple devices to read RMS levels simultaneously.
+
+    Used by the device selection modal to show live levels for all devices.
+    Call start() with a list of devices, then read levels via get_levels().
+    Call stop() when done (e.g. when modal closes).
+    """
+
+    def __init__(self):
+        self._streams: list = []          # active sounddevice InputStream objects
+        self._pa_threads: list[threading.Thread] = []
+        self._levels: dict[int, float] = {}  # device index -> rms level (0..1)
+        self._lock = threading.Lock()
+        self._running = False
+        self._pa_running_flags: dict[int, list] = {}  # device index -> [bool]
+
+    def start(self, devices: list[AudioDevice]):
+        """Begin monitoring the given devices."""
+        self.stop()
+        self._running = True
+        self._levels.clear()
+
+        for dev in devices:
+            self._levels[dev.index] = 0.0
+            try:
+                if dev.backend == "sounddevice":
+                    self._start_sd_monitor(dev)
+                elif dev.backend == "pyaudiowpatch":
+                    self._start_pa_monitor(dev)
+            except Exception as e:
+                print(f"Level monitor failed for {dev.name}: {e}")
+
+    def stop(self):
+        """Stop all monitoring streams."""
+        self._running = False
+        for flag_list in self._pa_running_flags.values():
+            flag_list[0] = False
+        for s in self._streams:
+            try:
+                s.stop()
+                s.close()
+            except Exception:
+                pass
+        self._streams.clear()
+        for t in self._pa_threads:
+            t.join(timeout=1.0)
+        self._pa_threads.clear()
+        self._pa_running_flags.clear()
+
+    def get_level(self, device_index: int) -> float:
+        """Get current RMS level (0..1) for a device. Returns 0 if not monitored."""
+        with self._lock:
+            return self._levels.get(device_index, 0.0)
+
+    def _start_sd_monitor(self, dev: AudioDevice):
+        import sounddevice as sd
+        idx = dev.index
+
+        def callback(indata, frames, time_info, status):
+            if not self._running:
+                return
+            rms = float(np.sqrt(np.mean(indata ** 2)))
+            db = 20.0 * np.log10(max(rms, 1e-10))
+            level = max(0.0, min(1.0, (db + 60.0) / 60.0))
+            with self._lock:
+                self._levels[idx] = level
+
+        try:
+            stream = sd.InputStream(
+                device=dev.index,
+                channels=min(dev.channels, 2),
+                samplerate=dev.sample_rate,
+                dtype='float32',
+                blocksize=2048,
+                callback=callback,
+            )
+            stream.start()
+            self._streams.append(stream)
+        except Exception as e:
+            print(f"SD level monitor error for {dev.name}: {e}")
+
+    def _start_pa_monitor(self, dev: AudioDevice):
+        flag = [True]
+        self._pa_running_flags[dev.index] = flag
+
+        def run():
+            try:
+                import pyaudiowpatch as pyaudio
+                p = pyaudio.PyAudio()
+                try:
+                    dev_info = p.get_device_info_by_index(dev.index)
+                    channels = max(int(dev_info.get('maxInputChannels', 2)), 1)
+                    rate = int(dev_info.get('defaultSampleRate', 44100))
+                    chunk = 2048
+
+                    stream = p.open(
+                        format=pyaudio.paInt16,
+                        channels=channels,
+                        rate=rate,
+                        input=True,
+                        input_device_index=dev.index,
+                        frames_per_buffer=chunk,
+                    )
+                    try:
+                        while self._running and flag[0]:
+                            try:
+                                data = stream.read(chunk, exception_on_overflow=False)
+                                samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                                rms = float(np.sqrt(np.mean(samples ** 2)))
+                                db = 20.0 * np.log10(max(rms, 1e-10))
+                                level = max(0.0, min(1.0, (db + 60.0) / 60.0))
+                                with self._lock:
+                                    self._levels[dev.index] = level
+                            except Exception:
+                                if not self._running:
+                                    break
+                                time.sleep(0.05)
+                    finally:
+                        stream.stop_stream()
+                        stream.close()
+                finally:
+                    p.terminate()
+            except Exception as e:
+                print(f"PA level monitor error for {dev.name}: {e}")
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        self._pa_threads.append(t)

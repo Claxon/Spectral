@@ -2,4 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.ini
+*.spec
+license.json
+settings.json
+build/
+dist/
 .claude/

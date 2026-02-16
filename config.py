@@ -53,6 +53,7 @@ def _ini_path() -> str:
 class AppConfig:
     # Audio
     input_device_index: int = -1
+    input_device_name: str = ""
     use_loopback: bool = False
     sample_rate: int = 44100
 

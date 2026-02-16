@@ -9,18 +9,24 @@ from audio_capture import AudioCapture, AudioDevice
 from dsp import DSPProcessor
 from themes import THEMES, apply_imgui_theme
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from license import LicenseManager
+
 
 class SettingsUI:
     def __init__(self, config: AppConfig, audio: AudioCapture, dsp: DSPProcessor,
-                 instance_id: str = ""):
+                 instance_id: str = "", license: "LicenseManager | None" = None):
         self.config = config
         self._audio = audio
         self._dsp = dsp
         self._id = instance_id
+        self._license = license
         self._devices: list[AudioDevice] = []
         self._device_names: list[str] = []
         self._selected_device_idx: int = 0
         self.show_settings: bool = True
+        self.request_upgrade: bool = False  # set True to open license modal
 
     def _uid(self, label: str) -> str:
         """Return unique widget ID for this instance."""
@@ -47,6 +53,20 @@ class SettingsUI:
             imgui.end()
             return False
 
+        is_pro = self._license.is_pro if self._license else True
+
+        if not is_pro:
+            # Upgrade banner
+            imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.16, 0.55, 0.94, 1.0))
+            imgui.push_style_color(imgui.Col_.button_hovered, imgui.ImVec4(0.22, 0.62, 1.0, 1.0))
+            imgui.push_style_color(imgui.Col_.button_active, imgui.ImVec4(0.12, 0.48, 0.85, 1.0))
+            if imgui.button(self._uid("Upgrade to Pro"), imgui.ImVec2(-1, 28)):
+                self.request_upgrade = True
+            imgui.pop_style_color(3)
+            imgui.spacing()
+            imgui.separator()
+            imgui.spacing()
+
         # ── Audio Device ──────────────────────────────────────────────
         if imgui.collapsing_header(self._uid("Audio Device"), imgui.TreeNodeFlags_.default_open):
             if imgui.button(self._uid("Refresh Devices")):
@@ -60,6 +80,7 @@ class SettingsUI:
                 self._audio.stop()
                 self.config.use_loopback = dev.is_loopback
                 self.config.input_device_index = dev.index
+                self.config.input_device_name = dev.name
                 self.config.sample_rate = int(dev.sample_rate)
                 self._audio.start(dev)
                 self._dsp.invalidate_caches()
@@ -78,9 +99,17 @@ class SettingsUI:
             imgui.separator()
 
         # ── Display Mode ──────────────────────────────────────────────
-        if imgui.collapsing_header(self._uid("Display"), imgui.TreeNodeFlags_.default_open):
+        if not is_pro:
+            imgui.begin_disabled()
+        _display_label = "Display" if is_pro else "\u2605 Display (Pro)"
+        if imgui.collapsing_header(self._uid(_display_label), imgui.TreeNodeFlags_.default_open):
             dm_list = list(DisplayMode)
-            dm_names = [d.name.replace("_", " ").title() for d in dm_list]
+            dm_names = []
+            for d in dm_list:
+                name = d.name.replace("_", " ").title()
+                if not is_pro and d != DisplayMode.BAR_GRAPH:
+                    name = f"\u2605 {name} (Pro)"
+                dm_names.append(name)
             dm_idx = dm_list.index(self.config.display_mode)
             imgui.text("Mode")
             imgui.same_line()
@@ -121,7 +150,8 @@ class SettingsUI:
             imgui.separator()
 
         # ── DSP Settings ──────────────────────────────────────────────
-        if imgui.collapsing_header(self._uid("DSP / Analysis"), imgui.TreeNodeFlags_.default_open):
+        _dsp_label = "DSP / Analysis" if is_pro else "\u2605 DSP / Analysis (Pro)"
+        if imgui.collapsing_header(self._uid(_dsp_label), imgui.TreeNodeFlags_.default_open):
             # FFT Size
             fft_sizes = [512, 1024, 2048, 4096, 8192, 16384]
             fft_labels = [str(s) for s in fft_sizes]
@@ -210,7 +240,8 @@ class SettingsUI:
             imgui.separator()
 
         # ── Peak Hold ─────────────────────────────────────────────────
-        if imgui.collapsing_header(self._uid("Peak Hold")):
+        _peak_label = "Peak Hold" if is_pro else "\u2605 Peak Hold (Pro)"
+        if imgui.collapsing_header(self._uid(_peak_label)):
             imgui.set_next_item_width(-1)
             ch, val = imgui.slider_float(self._uid("Hold Time"), self.config.peak_hold_time, 0.0, 10.0, "%.1f s")
             if ch:
@@ -226,12 +257,16 @@ class SettingsUI:
             imgui.separator()
 
         # ── Spectrogram ───────────────────────────────────────────────
-        if imgui.collapsing_header(self._uid("Spectrogram")):
+        _spec_label = "Spectrogram" if is_pro else "\u2605 Spectrogram (Pro)"
+        if imgui.collapsing_header(self._uid(_spec_label)):
             imgui.set_next_item_width(-1)
             ch, val = imgui.slider_float(self._uid("History"), self.config.spectrogram_history_seconds, 1.0, 30.0, "%.1f s")
             if ch:
                 self.config.spectrogram_history_seconds = val
                 changed = True
+
+        if not is_pro:
+            imgui.end_disabled()
 
         imgui.end()
         return changed
