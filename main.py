@@ -253,23 +253,25 @@ class SpectrumAnalyzerApp:
         imgui.internal.dock_builder_set_node_size(dockspace_id, vp.work_size)
 
         # Split: right panel for settings+levels, rest for main view
-        right_id = imgui.IntPtr(0)
-        left_id = imgui.internal.dock_builder_split_node(
-            dockspace_id, imgui.Dir_.left, 0.78, None, right_id
+        split_main = imgui.internal.dock_builder_split_node(
+            dockspace_id, imgui.Dir_.left, 0.78
         )
+        left_id = split_main.id_at_dir
+        right_id = split_main.id_at_opposite_dir
 
         # Split right into top (settings) and bottom (levels)
-        right_bottom_id = imgui.IntPtr(0)
-        right_top_id = imgui.internal.dock_builder_split_node(
-            right_id.value, imgui.Dir_.up, 0.65, None, right_bottom_id
+        split_right = imgui.internal.dock_builder_split_node(
+            right_id, imgui.Dir_.up, 0.65
         )
+        right_top_id = split_right.id_at_dir
+        right_bottom_id = split_right.id_at_opposite_dir
 
         # Dock windows
         if self.instances:
             inst = self.instances[0]
             imgui.internal.dock_builder_dock_window(f"Spectrum Analyzer##{inst._id_str}", left_id)
-            imgui.internal.dock_builder_dock_window(f"Settings##{inst._id_str}", right_top_id.value)
-            imgui.internal.dock_builder_dock_window(f"Levels##{inst._id_str}", right_bottom_id.value)
+            imgui.internal.dock_builder_dock_window(f"Settings##{inst._id_str}", right_top_id)
+            imgui.internal.dock_builder_dock_window(f"Levels##{inst._id_str}", right_bottom_id)
 
         imgui.internal.dock_builder_finish(dockspace_id)
 
@@ -874,5 +876,28 @@ def main():
     immapp.run(runner_params, addons)
 
 
+def _run_with_crash_log():
+    """Run main(); on any unhandled exception, write a traceback to crash.log
+    next to the executable so failures are diagnosable in frozen/windowed builds
+    (where there is no console). Re-raises so exit behavior is unchanged."""
+    import os
+    import traceback
+
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        try:
+            base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+                else os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(base, "crash.log"), "a", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+                f.write("\n")
+        except Exception:
+            pass
+        raise
+
+
 if __name__ == "__main__":
-    main()
+    _run_with_crash_log()
