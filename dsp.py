@@ -50,6 +50,14 @@ class DSPProcessor:
         # Band aggregation
         band_mags, band_centers = self._aggregate_bands(magnitudes_db, freqs)
 
+        # The first and last bands straddle the DC (≈0 Hz) and Nyquist bins,
+        # which carry windowing/sampling artifacts rather than real signal and
+        # otherwise show up as fixed phantom peaks at the graph edges. Duplicate
+        # each neighbour inward so the endpoints follow the real spectrum.
+        if len(band_mags) >= 3:
+            band_mags[0] = band_mags[1]
+            band_mags[-1] = band_mags[-2]
+
         # Spectral smoothing
         if self.config.spectral_smoothing > 1:
             k = self.config.spectral_smoothing

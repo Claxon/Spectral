@@ -11,6 +11,8 @@ class DisplayMode(Enum):
     BAR_GRAPH = auto()
     SMOOTH_LINE = auto()
     SPECTROGRAM = auto()
+    WATERFALL = auto()       # SDR-style scrolling heat-map (newest at top)
+    WATERFALL_3D = auto()    # perspective stack of recent spectra
     RADIAL = auto()
     OSCILLOSCOPE = auto()
     COMBINED = auto()
@@ -104,13 +106,21 @@ class AppConfig:
     # Display
     display_mode: DisplayMode = DisplayMode.BAR_GRAPH
     color_theme: ColorTheme = ColorTheme.DARK
+    # Which two visualisations the COMBINED mode stacks (top / bottom).
+    combined_top: DisplayMode = DisplayMode.BAR_GRAPH
+    combined_bottom: DisplayMode = DisplayMode.OSCILLOSCOPE
 
     # Peak hold
     peak_hold_time: float = 2.0
     peak_decay_rate: float = 0.15
 
-    # Spectrogram
+    # Spectrogram / Waterfall
     spectrogram_history_seconds: float = 5.0
+    # Number of historical rows kept on screen in the heat-map Waterfall.
+    waterfall_depth: int = 300
+    # Number of historical spectra stacked in the 3D Waterfall (more = longer
+    # visible history).
+    waterfall3d_depth: int = 110
 
     # Rendering
     show_fps: bool = True
@@ -147,6 +157,8 @@ class AppConfig:
                 "display_mode": DisplayMode,
                 "color_theme": ColorTheme,
                 "octave_mode": OctaveBandMode,
+                "combined_top": DisplayMode,
+                "combined_bottom": DisplayMode,
             }
             for f in fields(cfg):
                 if f.name in data:

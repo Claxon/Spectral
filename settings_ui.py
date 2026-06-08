@@ -29,8 +29,19 @@ _DISPLAY_MODE_INFO: dict[DisplayMode, tuple[str, str, str]] = {
                               "A filled, smoothed curve of the spectrum instead of "
                               "discrete bars. Cleaner look for slow-moving signals."),
     DisplayMode.SPECTROGRAM: (fa.ICON_FA_FIRE,         "Spectro",
-                              "Scrolling heat-map of frequency content over time "
-                              "(a waterfall). Brighter colour = more energy."),
+                              "Scrolling heat-map of frequency content over time. "
+                              "Brighter colour = more energy at that frequency."),
+    DisplayMode.WATERFALL:   (fa.ICON_FA_TABLE_CELLS,  "Waterfall",
+                              "Classic SDR waterfall: a scrolling heat-map of the "
+                              "spectrum over time. Frequency runs left-to-right; the "
+                              "newest moment is the bottom row and the history scrolls "
+                              "upward. Colour = magnitude, lined up with the 3D "
+                              "Waterfall. Use the History depth slider to set how much "
+                              "is kept on screen."),
+    DisplayMode.WATERFALL_3D:(fa.ICON_FA_BARS_STAGGERED, "3D Waterfall",
+                              "A 3D perspective stack of recent spectra — each frame "
+                              "is a ridge, newer in front, older receding back. Use "
+                              "the History depth slider to keep more of it on screen."),
     DisplayMode.RADIAL:      (fa.ICON_FA_BULLSEYE,     "Radial",
                               "The spectrum wrapped into a circle, with bars radiating "
                               "out from the centre. A decorative, symmetric view."),
@@ -147,6 +158,30 @@ class SettingsUI:
             self._tip(caption, tip)
         return changed
 
+    def _render_combined_selectors(self) -> bool:
+        """Two dropdowns choosing which visualisations fill the top and bottom
+        halves of Combined mode. Returns True if either changed."""
+        changed = False
+        # Every visualisation except Combined itself can be a sub-panel.
+        panel_modes = [m for m in DisplayMode if m != DisplayMode.COMBINED]
+        names = [_DISPLAY_MODE_INFO[m][1] for m in panel_modes]
+
+        for icon, attr, title in (
+            (fa.ICON_FA_WINDOW_MAXIMIZE, "combined_top", "Top panel"),
+            (fa.ICON_FA_WINDOW_MINIMIZE, "combined_bottom", "Bottom panel"),
+        ):
+            current = getattr(self.config, attr)
+            idx = panel_modes.index(current) if current in panel_modes else 0
+            self._label(icon, title, f"Combined — {title.lower()}",
+                        "Which visualisation fills this half of the Combined view.")
+            imgui.set_next_item_width(-1)
+            ch, idx = imgui.combo(self._uid(f"##{attr}"), idx, names)
+            if ch:
+                setattr(self.config, attr, panel_modes[idx])
+                changed = True
+            self._tip(title, "Pick any single visualisation for this half.")
+        return changed
+
     def render(self) -> bool:
         """Render settings panel. Returns True if config changed."""
         if not self.show_settings:
@@ -230,6 +265,48 @@ class SettingsUI:
                         "it does; the highlighted one is active.")
             if self._render_mode_picker():
                 changed = True
+
+            # Combined mode lets the user choose which two visualisations stack.
+            if self.config.display_mode == DisplayMode.COMBINED:
+                imgui.spacing()
+                if self._render_combined_selectors():
+                    changed = True
+
+            # Heat-map Waterfall: how many history rows to keep on screen.
+            if self.config.display_mode == DisplayMode.WATERFALL:
+                imgui.spacing()
+                self._label(fa.ICON_FA_LAYER_GROUP, "History depth",
+                            "Waterfall history depth",
+                            "How many rows of history the waterfall keeps on screen. "
+                            "Higher shows a longer stretch of time (and finer detail "
+                            "vertically); lower scrolls faster.")
+                imgui.set_next_item_width(-1)
+                ch, val = imgui.slider_int(self._uid("##wf_depth"),
+                                           self.config.waterfall_depth, 60, 1200)
+                if ch:
+                    self.config.waterfall_depth = val
+                    changed = True
+                self._tip("History depth",
+                          "Number of past frames shown. At ~60 fps, 300 rows is "
+                          "roughly 5 seconds of history.")
+
+            # 3D Waterfall: how many historical spectra to keep on screen.
+            if self.config.display_mode == DisplayMode.WATERFALL_3D:
+                imgui.spacing()
+                self._label(fa.ICON_FA_LAYER_GROUP, "History depth",
+                            "3D Waterfall history depth",
+                            "How many recent spectra are stacked on screen. Higher "
+                            "keeps sounds visible for longer as they recede into the "
+                            "distance; lower gives a faster, sparser stack.")
+                imgui.set_next_item_width(-1)
+                ch, val = imgui.slider_int(self._uid("##wf3d_depth"),
+                                           self.config.waterfall3d_depth, 24, 240)
+                if ch:
+                    self.config.waterfall3d_depth = val
+                    changed = True
+                self._tip("History depth",
+                          "Number of past frames shown in the 3D stack. At ~60 fps, "
+                          "110 frames is roughly 2 seconds of history.")
 
             imgui.spacing()
             self._label(fa.ICON_FA_GAUGE_HIGH, "Dynamic range", "Dynamic range (dB)",
