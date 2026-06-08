@@ -14,16 +14,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# Replace with your actual LemonSqueezy checkout URL
-PURCHASE_URL = "https://yourstore.lemonsqueezy.com/buy/your-product-id"
+# LemonSqueezy checkout URL for the Spectral Pro license.
+PURCHASE_URL = "https://novareaction.lemonsqueezy.com/checkout/buy/c4643fc9-d7dd-44cc-be99-132de184fabb"
 
 _API_BASE = "https://api.lemonsqueezy.com/v1/licenses"
 
 # How many seconds offline grace lasts since last successful server validation
 _OFFLINE_GRACE_SECONDS = 7 * 24 * 3600  # 7 days
 
-# Salt used for HMAC signing the license cache — change this to your own value
-_SIGNING_SALT = b"SpectrumAnalyzer_v1_license_signing_key_change_me"
+# Salt used for HMAC signing the local license cache (anti-tamper). Generated
+# from a cryptographically secure source. Keep it STABLE — changing it
+# invalidates every user's cached license and forces a re-validation.
+_SIGNING_SALT = b"Spectral_lic_v1_30ec742eae7aeddf9e2bec40cfe677862bb9140fe6de5c4cd7880ccc9ffd05c6"
 
 
 def _license_path() -> Path:
