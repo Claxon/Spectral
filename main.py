@@ -10,10 +10,10 @@ import time
 import ctypes
 import math
 import numpy as np
-from imgui_bundle import imgui, implot, immapp, hello_imgui
+from imgui_bundle import imgui, implot, immapp, hello_imgui, icons_fontawesome_6 as fa
 
 from config import (
-    AppConfig, DisplayMode, _ini_path, _compact_ini_path,
+    AppConfig, DisplayMode, ColorTheme, _ini_path, _compact_ini_path,
     load_app_prefs, save_app_prefs,
 )
 from ring_buffer import RingBuffer
@@ -519,6 +519,19 @@ class SpectrumAnalyzerApp:
                 ch_cm, self._compact_mode = imgui.checkbox("Compact Mode", self._compact_mode)
                 if ch_fps or ch_aot or ch_cm:
                     self._save_view_prefs()
+
+                imgui.separator()
+
+                # Colour theme — applies to the whole UI and every analyzer.
+                if imgui.begin_menu(f"{fa.ICON_FA_PALETTE}  Theme"):
+                    current = (self.instances[0].config.color_theme
+                               if self.instances else ColorTheme.DARK)
+                    for ct in ColorTheme:
+                        name = ct.name.replace("_", " ").title()
+                        if imgui.menu_item(name, "", ct == current, True)[0]:
+                            self._set_theme(ct)
+                    imgui.end_menu()
+
                 imgui.end_menu()
 
             if imgui.begin_menu("License"):
@@ -990,6 +1003,15 @@ class SpectrumAnalyzerApp:
             "always_on_top": self._always_on_top,
             "compact_mode": self._compact_mode,
         })
+
+    def _set_theme(self, theme: ColorTheme):
+        """Apply a colour theme to the whole UI and persist it. The theme is a
+        global look, so it's shared across every analyzer instance."""
+        for inst in self.instances:
+            inst.config.color_theme = theme
+        apply_imgui_theme(THEMES[theme])
+        if self.instances:
+            self.instances[0].config.save()
 
     def _get_main_hwnd(self) -> int:
         """Return the native HWND of the main window. Prefers the viewport's

@@ -1,7 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas = []
+# Bundle imgui_bundle's font assets (Roboto + Font Awesome 6). hello_imgui points
+# its asset folder at <imgui_bundle>/assets at import time, so the fonts must live
+# at _internal/imgui_bundle/assets/fonts in the frozen app — otherwise it falls
+# back to the built-in ProggyClean font, which renders no icons (or the star glyph).
+datas += collect_data_files('imgui_bundle', includes=['assets/fonts/**'])
 binaries = [('C:/Python313/Lib/site-packages/_portaudiowpatch.cp313-win_amd64.pyd', '.'), ('C:/Python313/Lib/site-packages/imgui_bundle/glfw3.dll', 'imgui_bundle'), ('C:/Python313/Lib/site-packages/imgui_bundle/_imgui_bundle.cp313-win_amd64.pyd', 'imgui_bundle')]
 hiddenimports = ['sounddevice', '_sounddevice_data', 'pyaudiowpatch', 'scipy.signal', 'scipy.signal.windows', 'glfw', 'app_icon_data']
 tmp_ret = collect_all('_sounddevice_data')
