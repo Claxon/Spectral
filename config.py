@@ -45,8 +45,41 @@ def _settings_path() -> Path:
 
 
 def _ini_path() -> str:
-    """Return path to imgui.ini for layout persistence."""
+    """Return path to imgui.ini for layout persistence (normal mode)."""
     return str(Path(os.path.dirname(os.path.abspath(__file__))) / "imgui.ini")
+
+
+def _compact_ini_path() -> str:
+    """Return path to the separate imgui layout file used in compact mode, so the
+    normal-mode layout is never overwritten while compact is active."""
+    return str(Path(os.path.dirname(os.path.abspath(__file__))) / "imgui_compact.ini")
+
+
+def _app_prefs_path() -> Path:
+    """Return path to app-level (non per-analyzer) UI preferences."""
+    return Path(os.path.dirname(os.path.abspath(__file__))) / "app_prefs.json"
+
+
+def load_app_prefs() -> dict:
+    """Load app-level UI preferences (View-menu toggles), or {} if none."""
+    path = _app_prefs_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r") as fp:
+            return json.load(fp)
+    except Exception as e:
+        print(f"Failed to load app prefs: {e}")
+        return {}
+
+
+def save_app_prefs(prefs: dict) -> None:
+    """Persist app-level UI preferences."""
+    try:
+        with open(_app_prefs_path(), "w") as fp:
+            json.dump(prefs, fp, indent=2)
+    except Exception as e:
+        print(f"Failed to save app prefs: {e}")
 
 
 @dataclass

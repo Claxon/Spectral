@@ -12,7 +12,10 @@ import math
 import numpy as np
 from imgui_bundle import imgui, implot, immapp, hello_imgui
 
-from config import AppConfig, DisplayMode, _ini_path
+from config import (
+    AppConfig, DisplayMode, _ini_path, _compact_ini_path,
+    load_app_prefs, save_app_prefs,
+)
 from ring_buffer import RingBuffer
 from audio_capture import AudioCapture, DeviceLevelMonitor
 from dsp import DSPProcessor, DSPResult
@@ -140,11 +143,15 @@ class AnalyzerInstance:
 
 
 class SpectrumAnalyzerApp:
-    def __init__(self):
+    def __init__(self, start_compact: bool = False):
         self.instances: list[AnalyzerInstance] = []
         self._prev_time: float = 0.0
         self._always_on_top: bool = False
-        self._hwnd = None
+        self._aot_applied: bool | None = None  # last applied topmost state
+        self._cli_compact: bool = start_compact
+        self._compact_mode: bool = start_compact
+        self._compact_applied: bool | None = None  # last applied compact state
+        self._relayout: str | None = None  # pending dock relayout request
         self._show_global_fps: bool = True
         self._instances_to_remove: list[int] = []
         self._show_input_modal: bool = False
@@ -172,10 +179,19 @@ class SpectrumAnalyzerApp:
         io = imgui.get_io()
         io.config_flags = io.config_flags | imgui.ConfigFlags_.docking_enable
 
+        # Restore app-level View preferences (CLI --compact overrides the saved
+        # compact preference).
+        prefs = load_app_prefs()
+        self._show_global_fps = bool(prefs.get("show_global_fps", True))
+        self._always_on_top = bool(prefs.get("always_on_top", False))
+        self._compact_mode = self._cli_compact or bool(prefs.get("compact_mode", False))
+        self._compact_applied = self._compact_mode  # initial state; no transition
+
         # Persist the imgui layout to a fixed file (imgui auto-saves the docking
-        # arrangement here). hello_imgui additionally persists the OS window
-        # geometry (restore_previous_geometry, configured in main()).
-        io.set_ini_filename(_ini_path())
+        # arrangement here). Compact mode uses a separate file so it never
+        # overwrites the normal-mode layout. hello_imgui additionally persists the
+        # OS window geometry (restore_previous_geometry, configured in main()).
+        io.set_ini_filename(_compact_ini_path() if self._compact_mode else _ini_path())
 
         # Decide whether to rebuild the built-in default layout this run (first
         # run, or after a LAYOUT_VERSION bump); otherwise the saved layout loads.
@@ -185,12 +201,14 @@ class SpectrumAnalyzerApp:
         saved_config = AppConfig.load()
         apply_imgui_theme(THEMES[saved_config.color_theme])
 
-        self._init_native_handle()
         self._license.validate_on_startup()
         self._splash_start_time = time.time()
 
         # Create first analyzer with saved config
         self._add_instance(saved_config)
+        # In compact mode the settings panel is hidden.
+        for inst in self.instances:
+            inst.show_controls = not self._compact_mode
 
     def gui(self) -> None:
         """Called every frame."""
@@ -206,6 +224,19 @@ class SpectrumAnalyzerApp:
             else:
                 self._render_splash(elapsed)
                 return  # Don't render normal UI while splash is active
+
+        # Apply window-manager state and mode transitions.
+        self._sync_always_on_top()
+        self._sync_compact()
+
+        # Compact mode trims padding to maximise the spectrum/levels area.
+        compact = self._compact_mode
+        n_style = 0
+        if compact:
+            imgui.push_style_var(imgui.StyleVar_.window_padding, imgui.ImVec2(2, 2))
+            imgui.push_style_var(imgui.StyleVar_.frame_padding, imgui.ImVec2(3, 2))
+            imgui.push_style_var(imgui.StyleVar_.item_spacing, imgui.ImVec2(4, 3))
+            n_style = 3
 
         self._render_toolbar()
         self._render_dockspace()
@@ -225,7 +256,10 @@ class SpectrumAnalyzerApp:
                         break
             self._instances_to_remove.clear()
 
-        if self._show_global_fps:
+        if n_style:
+            imgui.pop_style_var(n_style)
+
+        if self._show_global_fps and not compact:
             self._render_fps_overlay(dt)
 
         # Input selection modal
@@ -249,7 +283,8 @@ class SpectrumAnalyzerApp:
                 docked = False
             if docked or self._pending_layout_save == 0:
                 try:
-                    imgui.save_ini_settings_to_disk(_ini_path())
+                    ini = _compact_ini_path() if self._compact_mode else _ini_path()
+                    imgui.save_ini_settings_to_disk(ini)
                 except Exception:
                     pass
                 self._pending_layout_save = 0
@@ -319,6 +354,30 @@ class SpectrumAnalyzerApp:
 
         imgui.internal.dock_builder_finish(dockspace_id)
 
+    def _setup_compact_layout(self, dockspace_id):
+        """Compact layout: spectrum view fills the space with a narrow levels
+        strip on the right; the Settings panel is hidden (show_controls off)."""
+        imgui.internal.dock_builder_remove_node(dockspace_id)
+        imgui.internal.dock_builder_add_node(
+            dockspace_id, imgui.internal.DockNodeFlagsPrivate_.dock_space
+        )
+
+        vp = imgui.get_main_viewport()
+        imgui.internal.dock_builder_set_node_size(dockspace_id, vp.work_size)
+
+        split = imgui.internal.dock_builder_split_node(
+            dockspace_id, imgui.Dir_.right, 0.16
+        )
+        levels_id = split.id_at_dir
+        spectrum_id = split.id_at_opposite_dir
+
+        if self.instances:
+            inst = self.instances[0]
+            imgui.internal.dock_builder_dock_window(f"Spectrum Analyzer##{inst._id_str}", spectrum_id)
+            imgui.internal.dock_builder_dock_window(f"Levels##{inst._id_str}", levels_id)
+
+        imgui.internal.dock_builder_finish(dockspace_id)
+
     def _render_dockspace(self):
         """Create a fullscreen dockspace."""
         vp = imgui.get_main_viewport()
@@ -351,22 +410,38 @@ class SpectrumAnalyzerApp:
         # one) — detected from the live dock node. This self-heals: the user
         # never ends up with the analyzer floating in a separate window by
         # default, regardless of ini save timing.
+        # Handle an explicit relayout request (compact-mode entry).
+        if self._relayout == "compact":
+            self._relayout = None
+            self._setup_compact_layout(dockspace_id)
+            self._pending_layout_save = 30
+        elif self._first_frame:
+            if self._compact_mode:
+                # Starting in compact: build the compact layout fresh.
+                self._setup_compact_layout(dockspace_id)
+                self._pending_layout_save = 30
+            else:
+                try:
+                    node = imgui.internal.dock_builder_get_node(dockspace_id)
+                except Exception:
+                    node = None
+                no_layout = (node is None) or (not node.is_split_node())
+                if self._force_default_layout or no_layout:
+                    self._setup_default_layout(dockspace_id)
+                    # Persist the freshly built default as soon as the windows
+                    # have docked (checked in the gui() tick), so it survives even
+                    # a very short session, before imgui's auto-save fires.
+                    self._pending_layout_save = 30
         if self._first_frame:
             self._first_frame = False
-            try:
-                node = imgui.internal.dock_builder_get_node(dockspace_id)
-            except Exception:
-                node = None
-            no_layout = (node is None) or (not node.is_split_node())
-            if self._force_default_layout or no_layout:
-                self._setup_default_layout(dockspace_id)
-                # Persist the freshly built default as soon as the windows have
-                # actually docked (checked in the gui() tick), so it survives even
-                # a very short session, before imgui's periodic auto-save fires.
-                # Value is a max-frames budget; the save happens earlier once the
-                # dock node reports docked windows.
-                self._pending_layout_save = 30
-        imgui.dock_space(dockspace_id, imgui.ImVec2(0, 0), imgui.DockNodeFlags_.passthru_central_node)
+
+        # Drop the dock node's window-list (down-arrow) button — it overlapped the
+        # top edge and its function (listing docked windows) is redundant here.
+        ds_flags = (
+            int(imgui.DockNodeFlags_.passthru_central_node)
+            | int(imgui.internal.DockNodeFlagsPrivate_.no_window_menu_button)
+        )
+        imgui.dock_space(dockspace_id, imgui.ImVec2(0, 0), ds_flags)
 
         imgui.end()
 
@@ -420,10 +495,11 @@ class SpectrumAnalyzerApp:
                 imgui.end_menu()
 
             if imgui.begin_menu("View"):
-                ch, self._show_global_fps = imgui.checkbox("Show FPS", self._show_global_fps)
-                ch, self._always_on_top = imgui.checkbox("Always on Top", self._always_on_top)
-                if ch:
-                    self._set_always_on_top(self._always_on_top)
+                ch_fps, self._show_global_fps = imgui.checkbox("Show FPS", self._show_global_fps)
+                ch_aot, self._always_on_top = imgui.checkbox("Always on Top", self._always_on_top)
+                ch_cm, self._compact_mode = imgui.checkbox("Compact Mode", self._compact_mode)
+                if ch_fps or ch_aot or ch_cm:
+                    self._save_view_prefs()
                 imgui.end_menu()
 
             if imgui.begin_menu("License"):
@@ -888,36 +964,119 @@ class SpectrumAnalyzerApp:
         imgui.text(f"x{len(self.instances)}")
         imgui.end()
 
-    def _init_native_handle(self):
-        """Get the Win32 HWND for always-on-top support."""
+    def _save_view_prefs(self):
+        """Persist the app-level View-menu toggles."""
+        save_app_prefs({
+            "show_global_fps": self._show_global_fps,
+            "always_on_top": self._always_on_top,
+            "compact_mode": self._compact_mode,
+        })
+
+    def _get_main_hwnd(self) -> int:
+        """Return the native HWND of the main window. Prefers the viewport's
+        native handle; falls back to the first visible top-level window owned by
+        this process."""
         try:
-            self._hwnd = ctypes.windll.user32.FindWindowW(None, "Spectrum Analyzer")
-        except Exception as e:
-            print(f"Could not get native window handle: {e}")
-            self._hwnd = None
+            raw = imgui.get_main_viewport().platform_handle_raw
+            if raw:
+                return int(raw)
+        except Exception:
+            pass
+        try:
+            import os
+            user32 = ctypes.windll.user32
+            pid = os.getpid()
+            found = []
 
-    def _set_always_on_top(self, on_top: bool):
-        """Toggle always-on-top using Win32 API."""
-        if self._hwnd is None:
-            try:
-                self._hwnd = ctypes.windll.user32.FindWindowW(None, "Spectrum Analyzer")
-            except Exception:
-                pass
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def _cb(hwnd, lparam):
+                wpid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                if wpid.value == pid and user32.IsWindowVisible(hwnd):
+                    found.append(hwnd)
+                    return False
+                return True
 
-        if self._hwnd:
+            user32.EnumWindows(_cb, 0)
+            return int(found[0]) if found else 0
+        except Exception:
+            return 0
+
+    def _sync_always_on_top(self):
+        """Apply the always-on-top state to the real OS window, retrying each
+        frame until the window handle is available and SetWindowPos succeeds."""
+        if self._aot_applied == self._always_on_top:
+            return
+        hwnd = self._get_main_hwnd()
+        if not hwnd:
+            return  # handle not ready yet; try again next frame
+        try:
             HWND_TOPMOST = -1
             HWND_NOTOPMOST = -2
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
-            flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-            ctypes.windll.user32.SetWindowPos(
-                self._hwnd, flag, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE,
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+            ]
+            user32.SetWindowPos.restype = ctypes.c_bool
+            insert_after = HWND_TOPMOST if self._always_on_top else HWND_NOTOPMOST
+            ok = user32.SetWindowPos(
+                ctypes.c_void_p(hwnd), ctypes.c_void_p(insert_after),
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE,
             )
+            if ok:
+                self._aot_applied = self._always_on_top
+        except Exception:
+            pass
+
+    def _sync_compact(self):
+        """Handle compact-mode transitions: switch the layout ini so the two
+        modes' layouts stay independent, request the right dock rebuild, and
+        show/hide the per-analyzer settings panels."""
+        if self._compact_applied == self._compact_mode:
+            return
+        io = imgui.get_io()
+        if self._compact_mode:
+            # Entering compact: snapshot the normal layout, then use the compact
+            # ini and rebuild the compact dock layout.
+            try:
+                imgui.save_ini_settings_to_disk(_ini_path())
+            except Exception:
+                pass
+            try:
+                io.set_ini_filename(_compact_ini_path())
+            except Exception:
+                pass
+            self._relayout = "compact"
+        else:
+            # Leaving compact: persist the compact layout, switch back to the
+            # normal ini and reload the saved normal layout.
+            try:
+                imgui.save_ini_settings_to_disk(_compact_ini_path())
+                io.set_ini_filename(_ini_path())
+                imgui.load_ini_settings_from_disk(_ini_path())
+            except Exception:
+                pass
+            self._relayout = None
+        for inst in self.instances:
+            inst.show_controls = not self._compact_mode
+        self._compact_applied = self._compact_mode
 
 
 def main():
-    app = SpectrumAnalyzerApp()
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Spectral — real-time audio spectrum analyzer"
+    )
+    parser.add_argument(
+        "--compact", action="store_true",
+        help="Start in compact mode (spectrum + levels only, minimal chrome)",
+    )
+    args, _ = parser.parse_known_args()
+
+    app = SpectrumAnalyzerApp(start_compact=args.compact)
 
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "Spectrum Analyzer"
