@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = [('C:/Python313/Lib/site-packages/_portaudiowpatch.cp313-win_amd64.pyd', '.'), ('C:/Python313/Lib/site-packages/imgui_bundle/glfw3.dll', 'imgui_bundle'), ('C:/Python313/Lib/site-packages/imgui_bundle/_imgui_bundle.cp313-win_amd64.pyd', 'imgui_bundle')]
-hiddenimports = ['sounddevice', '_sounddevice_data', 'pyaudiowpatch', 'scipy.signal', 'scipy.signal.windows', 'glfw']
+hiddenimports = ['sounddevice', '_sounddevice_data', 'pyaudiowpatch', 'scipy.signal', 'scipy.signal.windows', 'glfw', 'app_icon_data']
 tmp_ret = collect_all('_sounddevice_data')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pydantic')
@@ -43,6 +43,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='spectral.ico',
 )
 coll = COLLECT(
     exe,

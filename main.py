@@ -29,6 +29,22 @@ from license import LicenseManager, PURCHASE_URL
 LAYOUT_VERSION = 1
 
 
+class _GlfwIconImage:
+    """Duck-typed image accepted by glfw.set_window_icon (it looks for `.size`
+    and `.convert(...).getdata()`), built from raw RGBA bytes — no Pillow needed."""
+
+    def __init__(self, width: int, height: int, rgba: bytes):
+        self.size = (width, height)
+        self._rgba = rgba
+
+    def convert(self, _mode):
+        return self
+
+    def getdata(self):
+        raw = self._rgba
+        return [tuple(raw[i:i + 4]) for i in range(0, len(raw), 4)]
+
+
 class AnalyzerInstance:
     """A self-contained spectrum analyzer with its own audio, DSP, and rendering."""
 
@@ -152,6 +168,7 @@ class SpectrumAnalyzerApp:
         self._compact_mode: bool = start_compact
         self._compact_applied: bool | None = None  # last applied compact state
         self._relayout: str | None = None  # pending dock relayout request
+        self._icon_set: bool = False
         self._show_global_fps: bool = True
         self._instances_to_remove: list[int] = []
         self._show_input_modal: bool = False
@@ -226,6 +243,8 @@ class SpectrumAnalyzerApp:
                 return  # Don't render normal UI while splash is active
 
         # Apply window-manager state and mode transitions.
+        if not self._icon_set:
+            self._icon_set = self._set_window_icon()
         self._sync_always_on_top()
         self._sync_compact()
 
@@ -1001,6 +1020,25 @@ class SpectrumAnalyzerApp:
             return int(found[0]) if found else 0
         except Exception:
             return 0
+
+    def _set_window_icon(self) -> bool:
+        """Set the GLFW window/taskbar icon from the embedded icon data (no Pillow
+        dependency). Returns True on success. Retries next frame if the window
+        isn't available yet."""
+        try:
+            import glfw
+            import app_icon_data
+        except Exception:
+            return True  # icon module/glfw unavailable; don't keep retrying
+        try:
+            win = glfw.get_current_context()
+            if not win:
+                return False  # window not ready; retry next frame
+            images = [_GlfwIconImage(w, h, raw) for (w, h, raw) in app_icon_data.icon_images()]
+            glfw.set_window_icon(win, len(images), images)
+            return True
+        except Exception:
+            return True  # don't spin retrying on a hard failure
 
     def _sync_always_on_top(self):
         """Apply the always-on-top state to the real OS window, retrying each
