@@ -149,6 +149,7 @@ class SpectrumAnalyzerApp:
         self._modal_device_levels: dict[int, float] = {}
         self._device_level_monitor = DeviceLevelMonitor()
         self._first_frame: bool = True
+        self._toolbar_height: float = 0.0
         self._license = LicenseManager()
         self._show_license_modal: bool = False
         self._license_key_buf: str = ""
@@ -198,8 +199,8 @@ class SpectrumAnalyzerApp:
             self._first_frame = False
             self._setup_default_layout()
 
-        self._render_dockspace()
         self._render_toolbar()
+        self._render_dockspace()
 
         for inst in self.instances:
             inst.update(dt)
@@ -278,8 +279,9 @@ class SpectrumAnalyzerApp:
     def _render_dockspace(self):
         """Create a fullscreen dockspace."""
         vp = imgui.get_main_viewport()
-        imgui.set_next_window_pos(vp.work_pos)
-        imgui.set_next_window_size(vp.work_size)
+        offset_y = self._toolbar_height
+        imgui.set_next_window_pos(imgui.ImVec2(vp.work_pos.x, vp.work_pos.y + offset_y))
+        imgui.set_next_window_size(imgui.ImVec2(vp.work_size.x, vp.work_size.y - offset_y))
         imgui.set_next_window_viewport(vp.id_)
 
         flags = (
@@ -290,7 +292,6 @@ class SpectrumAnalyzerApp:
             | imgui.WindowFlags_.no_bring_to_front_on_focus
             | imgui.WindowFlags_.no_nav_focus
             | imgui.WindowFlags_.no_background
-            | imgui.WindowFlags_.menu_bar
         )
         imgui.push_style_var(imgui.StyleVar_.window_rounding, 0.0)
         imgui.push_style_var(imgui.StyleVar_.window_border_size, 0.0)
@@ -391,6 +392,7 @@ class SpectrumAnalyzerApp:
 
             imgui.end_menu_bar()
 
+        self._toolbar_height = imgui.get_window_height()
         imgui.end()
 
     def _open_input_modal(self, inst: AnalyzerInstance):
