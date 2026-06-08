@@ -21,6 +21,10 @@ from settings_ui import SettingsUI
 from themes import THEMES, apply_imgui_theme
 from license import LicenseManager, PURCHASE_URL
 
+# Bump this when the built-in default window layout changes, to force a one-time
+# reset of users' saved layout so they pick up the new arrangement.
+LAYOUT_VERSION = 1
+
 
 class AnalyzerInstance:
     """A self-contained spectrum analyzer with its own audio, DSP, and rendering."""
@@ -150,6 +154,9 @@ class SpectrumAnalyzerApp:
         self._device_level_monitor = DeviceLevelMonitor()
         self._first_frame: bool = True
         self._toolbar_height: float = 0.0
+        self._force_default_layout: bool = False
+        self._pending_layout_save: int = 0
+        self._dockspace_id: int = 0
         self._license = LicenseManager()
         self._show_license_modal: bool = False
         self._license_key_buf: str = ""
@@ -165,8 +172,14 @@ class SpectrumAnalyzerApp:
         io = imgui.get_io()
         io.config_flags = io.config_flags | imgui.ConfigFlags_.docking_enable
 
-        # Point imgui.ini to our persistent location
+        # Persist the imgui layout to a fixed file (imgui auto-saves the docking
+        # arrangement here). hello_imgui additionally persists the OS window
+        # geometry (restore_previous_geometry, configured in main()).
         io.set_ini_filename(_ini_path())
+
+        # Decide whether to rebuild the built-in default layout this run (first
+        # run, or after a LAYOUT_VERSION bump); otherwise the saved layout loads.
+        self._force_default_layout = self._layout_should_reset()
 
         # Load saved config
         saved_config = AppConfig.load()
@@ -193,11 +206,6 @@ class SpectrumAnalyzerApp:
             else:
                 self._render_splash(elapsed)
                 return  # Don't render normal UI while splash is active
-
-        # Build a default docked layout on first run (no imgui.ini yet)
-        if self._first_frame:
-            self._first_frame = False
-            self._setup_default_layout()
 
         self._render_toolbar()
         self._render_dockspace()
@@ -228,6 +236,24 @@ class SpectrumAnalyzerApp:
         if self._show_license_modal:
             self._render_license_modal()
 
+        # Force-persist a freshly built default layout once its windows have
+        # docked (or at the latest when the countdown elapses), so it survives
+        # even a very short first session, before imgui's auto-save would fire.
+        if self._pending_layout_save > 0:
+            self._pending_layout_save -= 1
+            docked = False
+            try:
+                node = imgui.internal.dock_builder_get_node(self._dockspace_id)
+                docked = node is not None and node.count_node_with_windows > 0
+            except Exception:
+                docked = False
+            if docked or self._pending_layout_save == 0:
+                try:
+                    imgui.save_ini_settings_to_disk(_ini_path())
+                except Exception:
+                    pass
+                self._pending_layout_save = 0
+
     def cleanup(self) -> None:
         self._device_level_monitor.stop()
         for inst in self.instances:
@@ -239,16 +265,33 @@ class SpectrumAnalyzerApp:
         inst.start_default_device()
         self.instances.append(inst)
 
-    def _setup_default_layout(self):
-        """Programmatically dock windows on first launch."""
+    def _layout_should_reset(self) -> bool:
+        """Return True when the built-in default layout should be (re)built this
+        run: first run, or after LAYOUT_VERSION advanced. Persists a version
+        marker so subsequent runs restore the user's saved layout instead."""
         import os
-        ini_path = _ini_path()
-        if os.path.exists(ini_path):
-            return  # Layout already saved, don't override
+        try:
+            marker = os.path.join(os.path.dirname(_ini_path()), "layout.version")
+            current = 0
+            if os.path.exists(marker):
+                with open(marker, "r") as f:
+                    current = int((f.read().strip() or "0"))
+            if current < LAYOUT_VERSION:
+                with open(marker, "w") as f:
+                    f.write(str(LAYOUT_VERSION))
+                return True
+        except Exception:
+            pass
+        return False
 
-        dockspace_id = imgui.get_id("MainDockSpace")
+    def _setup_default_layout(self, dockspace_id):
+        """Programmatically dock windows into the main dockspace. dockspace_id
+        MUST be the id used by dock_space() in _render_dockspace, computed in the
+        same window scope (otherwise the layout targets a phantom node)."""
         imgui.internal.dock_builder_remove_node(dockspace_id)
-        imgui.internal.dock_builder_add_node(dockspace_id, imgui.DockNodeFlags_.none)
+        imgui.internal.dock_builder_add_node(
+            dockspace_id, imgui.internal.DockNodeFlagsPrivate_.dock_space
+        )
 
         vp = imgui.get_main_viewport()
         imgui.internal.dock_builder_set_node_size(dockspace_id, vp.work_size)
@@ -300,6 +343,29 @@ class SpectrumAnalyzerApp:
         imgui.pop_style_var(3)
 
         dockspace_id = imgui.get_id("MainDockSpace")
+        self._dockspace_id = dockspace_id
+        # On the first frame, (re)build the default layout if needed, using THIS
+        # dockspace_id so the dock-builder targets the same node dock_space()
+        # submits below. Rebuild when forced (version bump) OR when no real
+        # layout was restored (fresh run, or a prior session that never saved
+        # one) — detected from the live dock node. This self-heals: the user
+        # never ends up with the analyzer floating in a separate window by
+        # default, regardless of ini save timing.
+        if self._first_frame:
+            self._first_frame = False
+            try:
+                node = imgui.internal.dock_builder_get_node(dockspace_id)
+            except Exception:
+                node = None
+            no_layout = (node is None) or (not node.is_split_node())
+            if self._force_default_layout or no_layout:
+                self._setup_default_layout(dockspace_id)
+                # Persist the freshly built default as soon as the windows have
+                # actually docked (checked in the gui() tick), so it survives even
+                # a very short session, before imgui's periodic auto-save fires.
+                # Value is a max-frames budget; the save happens earlier once the
+                # dock node reports docked windows.
+                self._pending_layout_save = 30
         imgui.dock_space(dockspace_id, imgui.ImVec2(0, 0), imgui.DockNodeFlags_.passthru_central_node)
 
         imgui.end()
@@ -856,6 +922,8 @@ def main():
     runner_params = hello_imgui.RunnerParams()
     runner_params.app_window_params.window_title = "Spectrum Analyzer"
     runner_params.app_window_params.window_geometry.size = (1400, 800)
+    # Remember and restore the OS window size/position across runs.
+    runner_params.app_window_params.restore_previous_geometry = True
     runner_params.app_window_params.borderless = True
     runner_params.app_window_params.borderless_movable = True
     runner_params.app_window_params.borderless_resizable = True
@@ -869,8 +937,10 @@ def main():
     runner_params.callbacks.before_exit = app.cleanup
     runner_params.fps_idling.enable_idling = False
 
-    # Use our own ini file path (set in setup callback after context creation)
-    runner_params.ini_folder_type = hello_imgui.IniFolderType.current_folder
+    # Store hello_imgui's settings (incl. saved window geometry) in a stable
+    # location next to the executable so it survives restarts regardless of the
+    # working directory. The imgui layout ini path is set separately in setup().
+    runner_params.ini_folder_type = hello_imgui.IniFolderType.app_executable_folder
 
     addons = immapp.AddOnsParams()
     addons.with_implot = True
